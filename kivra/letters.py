@@ -19,7 +19,31 @@ class LetterFetcher:
         self.api_client = api_client
         self.document_store = document_store
     
-    def fetch_letters(self, max_count=None):
+    def list_letters(self, sender_key=None):
+        all_letters = []
+        after = None
+        seen_cursors = set()
+        while True:
+            variables = {"after": after, "filter": "inbox", "senderKey": sender_key, "take": 100}
+            data = self.api_client.graphql_query("ContentList", LETTERS_QUERY, variables)
+            page = data.get('data', {}).get('contents') or {}
+            items = page.get('list') or []
+            for item in items:
+                if sender_key and (item.get('sender') or {}).get('key') != sender_key:
+                    raise RuntimeError('ContentList returned a letter from another sender')
+            all_letters.extend(items)
+            if not page.get('existsMore'):
+                break
+            if not items:
+                raise RuntimeError('ContentList has more pages but returned no cursor')
+            cursor = items[-1].get('key')
+            if not cursor or cursor == after or cursor in seen_cursors:
+                raise RuntimeError('ContentList pagination cursor did not advance')
+            seen_cursors.add(cursor)
+            after = cursor
+        return all_letters
+
+    def fetch_letters(self, max_count=None, sender_key=None):
         """
         Fetch letters from Kivra.
         
@@ -32,37 +56,14 @@ class LetterFetcher:
         print("\nFetching letters...")
         
         try:
-            # Fetch all letters with pagination
-            all_letters = []
-            after = None
-            
-            while True:
-                variables = {
-                    "after": after,
-                    "filter": "inbox",
-                    "senderKey": None,
-                    "take": 100  # Increase per-page count for fewer requests
-                }
-                
-                data = self.api_client.graphql_query("ContentList", LETTERS_QUERY, variables)
-                
-                page_content = data.get('data', {}).get('contents', {})
-                page_letters = page_content.get('list', [])
-                all_letters.extend(page_letters)
-                
-                exists_more = page_content.get('existsMore', False)
-                if not exists_more or not page_letters:
-                    break
-                    
-                # Use the last letter's key as 'after' for the next page
-                after = page_letters[-1]['key']
-                print(f"Fetched {len(all_letters)} letters of {page_content.get('total', '?')}...")
+            all_letters = self.list_letters(sender_key)
             
             total_letters = len(all_letters)
             print(f"\nFound a total of {total_letters} letters")
             
-            # Report letter list for storage
-            self.document_store.report_listing('letters', all_letters)
+            # Report the selected mailbox/sender listing with the document store.
+            if hasattr(self.document_store, 'report_listing'):
+                self.document_store.report_listing('letters', all_letters)
             
             # Limit the number of letters if max_count is set
             if max_count is not None:
@@ -75,6 +76,10 @@ class LetterFetcher:
             # Process each letter
             print("\nFetching PDF and details for each letter...")
             for letter_data in all_letters:
+                if sender_key is not None and hasattr(self.document_store, 'archive_letter'):
+                    if self.document_store.archive_letter(letter_data, self.api_client):
+                        letters_stored += 1
+                    continue
                 # Pass the counter to _process_letter and get the updated value
                 letters_stored = self._process_letter(letter_data, letters_stored)
                 
@@ -88,7 +93,6 @@ class LetterFetcher:
             }
             
         except Exception as e:
-            logging.error(f"Error fetching letters: {str(e)}")
             raise
     
     def _process_letter(self, letter_data, letters_stored):

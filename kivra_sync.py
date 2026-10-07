@@ -7,16 +7,31 @@ import logging
 import argparse
 import base64
 import tempfile
+import getpass
+from collections import Counter
 
 from __version__ import __version__
 from kivra.auth import KivraAuth
 from kivra.api import KivraApiClient
 from kivra.receipts import ReceiptFetcher
 from kivra.letters import LetterFetcher
-from storage.filesystem import FileSystemStoreProvider
+from storage.company_archive import CompanyArchive
+from storage.mailbox import mailbox_folder_name
 from interaction.local import LocalInteractionProvider
 from interaction.ntfy import NtfyInteractionProvider
 from interaction.web import WebInteractionProvider
+
+
+def create_company_store(base_dir, mailbox_name, sender_key=None,
+                         layout='standard', dry_run=False):
+    mailbox_dir = os.path.join(base_dir, mailbox_folder_name(mailbox_name))
+    if layout == 'dated':
+        return CompanyArchive(mailbox_dir, sender_key, dry_run=dry_run)
+    if layout != 'standard':
+        raise ValueError('Unknown company storage layout')
+    from storage.filesystem import FileSystemStoreProvider
+    return FileSystemStoreProvider(mailbox_dir, dry_run=dry_run)
+
 
 def fetch_documents(args, interaction_provider, document_store, temp_dir):
     """
@@ -38,10 +53,23 @@ def fetch_documents(args, interaction_provider, document_store, temp_dir):
         
         # Extract tokens
         access_token = token_info['access_token']
-        actor_key = token_info['actor_key']
+        personal_user_id = token_info['actor_key']
+        actor_key = getpass.getpass('Company actor key: ').strip() if args.company else personal_user_id
+        if not actor_key:
+            raise ValueError('Company actor key is required')
         
         # Initialize API client
-        api_client = KivraApiClient(access_token, actor_key)
+        api_client = KivraApiClient(access_token, actor_key,
+                                    actor_type='company' if args.company else 'user',
+                                    personal_user_id=personal_user_id,
+                                    request_interval_seconds=args.request_interval)
+        if args.list_senders:
+            letters = LetterFetcher(api_client, document_store).list_letters()
+            counts = Counter(((item.get('sender') or {}).get('key'),
+                              (item.get('sender') or {}).get('name')) for item in letters)
+            for (key, name), count in sorted(counts.items(), key=lambda entry: (entry[0][1] or '', entry[0][0] or '')):
+                print(f'{name or "Unknown"}\t{key or "Missing key"}\t{count}')
+            return 0
         
         # Initialize statistics
         stats = {
@@ -62,15 +90,20 @@ def fetch_documents(args, interaction_provider, document_store, temp_dir):
         # Fetch letters if enabled
         if args.fetch_letters:
             letter_fetcher = LetterFetcher(api_client, document_store)
-            letter_stats = letter_fetcher.fetch_letters(max_count=None if args.max_letters == 0 else args.max_letters)
+            letter_stats = letter_fetcher.fetch_letters(max_count=None if args.max_letters == 0 else args.max_letters,
+                                                        sender_key=args.sender_key)
             stats.update(letter_stats)
+            if (args.company and args.company_layout == 'dated' and
+                    not args.dry_run and document_store.sender_dir):
+                from storage.company_index import rebuild_index
+                rebuild_index(document_store.sender_dir)
         
         # Report completion
         interaction_provider.report_completion(stats)
         
         return 0
     except Exception as e:
-        logging.error(f"Error: {str(e)}")
+        logging.error("%s: %s", type(e).__name__, str(e) if isinstance(e, (ValueError, RuntimeError)) else 'operation failed')
         return 1
 
 def main():
@@ -85,12 +118,21 @@ def main():
         prog='kivra-sync'
     )
     parser.add_argument('--version', action='version', version=f'%(prog)s {__version__}')
-    parser.add_argument('ssn', help='Personal identity number (YYYYMMDDXXXX)')
+    parser.add_argument('ssn', nargs='?', help='Personal identity number (YYYYMMDDXXXX); prompted if omitted')
+    parser.add_argument('--company', action='store_true', help='Use a company actor; prompts for its key after BankID')
+    parser.add_argument('--mailbox-name', help='Company/mailbox name used as a local storage subfolder')
+    parser.add_argument('--company-layout', choices=['standard', 'dated'], default='standard',
+                        help='Company storage layout: upstream filesystem layout or local year/month archive')
+    parser.add_argument('--list-senders', action='store_true', help='List observed inbox sender names, keys and counts')
+    parser.add_argument('--sender-key', help='Sync only this sender key from the current actor mailbox')
     
     # Storage provider selection
     parser.add_argument('--storage-provider', choices=['filesystem', 'paperless'], default='filesystem',
                         help='Storage provider to use (default: filesystem)')
-    parser.add_argument('--base-dir', help='Base directory for storing documents (default: script directory)')
+    parser.add_argument('--root-dir', '--base-dir', dest='root_dir',
+                        help='Root directory for local documents (default: current working directory; --base-dir alias)')
+    parser.add_argument('--request-interval', type=float, default=1.2,
+                        help='Minimum seconds between Kivra API requests (minimum 1.0; default: 1.2)')
     
     # Interaction provider selection
     parser.add_argument('--interaction-provider', choices=['local', 'ntfy', 'web'], default='local',
@@ -125,6 +167,28 @@ def main():
     parser.add_argument('--max-letters', type=int, default=0, help='Maximum number of letters to fetch (default: 0, 0 for unlimited)')
     
     args = parser.parse_args()
+    if args.request_interval < 1.0:
+        parser.error('--request-interval must be at least 1.0 second')
+    if args.company:
+        if args.interaction_provider != 'local' or args.storage_provider != 'filesystem':
+            parser.error('Company mode requires local interaction and filesystem storage')
+        if not args.root_dir:
+            parser.error('Company mode requires --root-dir for the archive destination')
+        if not args.list_senders and not args.sender_key:
+            parser.error('Company mode requires --list-senders or --sender-key')
+        if not args.mailbox_name:
+            args.mailbox_name = input('Company/mailbox name for local archive: ').strip()
+        try:
+            args.mailbox_name = mailbox_folder_name(args.mailbox_name)
+        except ValueError as exc:
+            parser.error(str(exc))
+        args.fetch_receipts = False
+    elif args.mailbox_name or args.company_layout != 'standard':
+        parser.error('--mailbox-name and --company-layout require --company')
+    if args.sender_key and not args.company:
+        parser.error('--sender-key requires --company')
+    if not args.ssn:
+        args.ssn = getpass.getpass('Personal identity number (YYYYMMDDXXXX): ').strip()
     
     # Create temp directory for QR codes and other temporary files
     # Prefer env overrides and OS temp; avoid writing into read-only installs
@@ -138,13 +202,21 @@ def main():
     
     # Initialize the document storage provider
     if args.storage_provider == 'filesystem':
-        # Use base_dir if provided, otherwise use env or current directory
-        base_dir = (
-            args.base_dir
-            if args.base_dir
+        # Use root_dir if provided, otherwise use the current directory.
+        root_dir = (
+            args.root_dir
+            if args.root_dir
             else os.getcwd()
         )
-        document_store = FileSystemStoreProvider(os.path.join(base_dir, args.ssn), dry_run=args.dry_run)
+        if args.company:
+            document_store = create_company_store(root_dir, args.mailbox_name,
+                                                  args.sender_key, args.company_layout,
+                                                  dry_run=args.dry_run)
+        else:
+            # Import lazily: the personal filesystem provider imports WeasyPrint,
+            # which requires native GTK libraries not needed for company archives.
+            from storage.filesystem import FileSystemStoreProvider
+            document_store = FileSystemStoreProvider(os.path.join(root_dir, args.ssn), dry_run=args.dry_run)
     elif args.storage_provider == 'paperless':
         # Check if required paperless options are provided
         if not args.paperless_url or not args.paperless_token:

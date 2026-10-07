@@ -6,7 +6,6 @@ import json
 import logging
 from storage.base import DocumentStoreProvider
 from utils.helpers import clean_filename
-from utils.pdf import html_to_pdf
 
 class FileSystemStoreProvider(DocumentStoreProvider):
     """Storage provider that stores documents in the file system."""
@@ -133,8 +132,9 @@ class FileSystemStoreProvider(DocumentStoreProvider):
                 file_path = os.path.join(file_dir, f"{filename_base}.txt")
                 return os.path.exists(file_path)
             elif content_type == 'text/html':
-                file_path = os.path.join(file_dir, f"{filename_base}_html.pdf")
-                return os.path.exists(file_path)
+                pdf_path = os.path.join(file_dir, f"{filename_base}_html.pdf")
+                html_path = os.path.join(file_dir, f"{filename_base}_html.html")
+                return os.path.exists(pdf_path) or os.path.exists(html_path)
             
             return False
         except Exception as e:
@@ -203,7 +203,12 @@ class FileSystemStoreProvider(DocumentStoreProvider):
                 return True
             elif content_type == 'text/html':
                 # Use the extracted HTML to PDF conversion utility
-                pdf_data = html_to_pdf(data)
+                try:
+                    from utils.pdf import html_to_pdf
+                    pdf_data = html_to_pdf(data)
+                except (ImportError, OSError) as e:
+                    logging.warning("HTML-to-PDF support unavailable; preserving the HTML source: %s", e)
+                    pdf_data = None
                 
                 if pdf_data:
                     file_path = os.path.join(dir_path, f"{filename_base}_html.pdf")
@@ -221,7 +226,7 @@ class FileSystemStoreProvider(DocumentStoreProvider):
                         return True
                     with open(file_path, 'w', encoding='utf-8') as f:
                         f.write(data)
-                    return False
+                    return True
             
             logging.warning(f"Unsupported content type: {content_type}")
             return False
