@@ -144,7 +144,7 @@ class KivraAuth:
                              })
         
         if r.status_code not in [201, 202]:
-            logging.error(f"OAuth2 authorization failed. Status: {r.status_code}, Response: {r.text}")
+            logging.error(f"OAuth2 authorization failed (HTTP {r.status_code})")
             sys.exit("Could not initialize OAuth2")
         
         return r.json()
@@ -196,7 +196,7 @@ class KivraAuth:
                                                  headers={'Content-Type': 'application/json'})
                 
                 if token_response.status_code != 200:
-                    logging.error(f"Failed to fetch token. Status: {token_response.status_code}, Response: {token_response.text}")
+                    logging.error(f"Token retrieval failed (HTTP {token_response.status_code})")
                     sys.exit("Token retrieval failed")
                 
                 token_info = token_response.json()
@@ -218,14 +218,13 @@ class KivraAuth:
                 actor_key = jwt_data.get('kivra_user_id')
                 
                 if not actor_key:
-                    logging.error(f"Could not find kivra_user_id in token: {jwt_data}")
+                    logging.error("Could not find kivra_user_id in ID token")
                     sys.exit("Missing kivra_user_id")
                 
                 # Return token information
                 return {
                     'access_token': access_token,
-                    'actor_key': actor_key,
-                    'jwt_data': jwt_data
+                    'actor_key': actor_key
                 }
             
             elif status == 'pending':
@@ -239,5 +238,5 @@ class KivraAuth:
                 if new_poll_url:
                     next_poll_url = new_poll_url
             else:
-                logging.error(f"Error during polling. Status: {poll_data.get('status')}, Response: {poll_data}")
+                logging.error("BankID polling failed")
                 sys.exit("BankID authentication failed")

@@ -4,11 +4,14 @@
 import requests
 import logging
 import sys
+import time
+from urllib.parse import quote
 
 class KivraApiClient:
     """Client for interacting with Kivra's API."""
     
-    def __init__(self, access_token, actor_key):
+    def __init__(self, access_token, actor_key, actor_type='user', personal_user_id=None,
+                 request_interval_seconds=1.2):
         """
         Initialize the Kivra API client.
         
@@ -17,9 +20,24 @@ class KivraApiClient:
             actor_key (str): Kivra user ID
         """
         self.access_token = access_token
+        if actor_type not in ('user', 'company') or not actor_key:
+            raise ValueError('A valid actor type and key are required')
         self.actor_key = actor_key
+        self.actor_type = actor_type
+        self.personal_user_id = personal_user_id or actor_key
+        self.request_interval_seconds = max(1.0, float(request_interval_seconds))
+        self._last_request_started = None
         self.graphql_url = "https://bff.kivra.com/graphql"
         self.session = requests.Session()
+
+    def _pace_request(self):
+        """Keep sequential API calls at least one second apart."""
+        now = time.monotonic()
+        if self._last_request_started is not None:
+            remaining = self.request_interval_seconds - (now - self._last_request_started)
+            if remaining > 0:
+                time.sleep(remaining)
+        self._last_request_started = time.monotonic()
     
     def get_headers(self):
         """
@@ -35,8 +53,8 @@ class KivraApiClient:
             'Referer': 'https://inbox.kivra.com/',
             'Authorization': f'Bearer {self.access_token}',
             'X-Actor-Key': self.actor_key,
-            'X-Actor-Type': 'user',
-            'X-Session-Actor': f'user_{self.actor_key}',
+            'X-Actor-Type': self.actor_type,
+            'X-Session-Actor': f'user_{self.personal_user_id}',
             'X-Kivra-Environment': 'production',
             'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
             'Accept-Language': 'sv',
@@ -63,8 +81,8 @@ class KivraApiClient:
         }
         
         logging.debug(f"GraphQL query: {operation_name}")
-        logging.debug(f"Variables: {variables}")
         
+        self._pace_request()
         response = self.session.post(
             self.graphql_url,
             json=payload,
@@ -72,13 +90,11 @@ class KivraApiClient:
         )
         
         if response.status_code != 200:
-            logging.error(f"GraphQL error: {response.status_code}, {response.text}")
-            raise Exception(f"GraphQL query failed: {response.status_code}")
+            raise RuntimeError(f"GraphQL {operation_name} failed (HTTP {response.status_code})")
             
         data = response.json()
         if 'errors' in data:
-            logging.error(f"GraphQL errors: {data['errors']}")
-            raise Exception(f"GraphQL query returned errors: {data['errors']}")
+            raise RuntimeError(f"GraphQL {operation_name} returned errors")
             
         return data
     
@@ -97,15 +113,11 @@ class KivraApiClient:
             'Accept': 'application/pdf'
         }
         
+        self._pace_request()
         response = self.session.get(url, headers=headers)
         
         if response.status_code != 200:
-            logging.error(f"Failed to get PDF. Status: {response.status_code}")
-            logging.error(f"URL: {url}")
-            logging.error(f"Headers: {headers}")
-            logging.error(f"Response headers: {dict(response.headers)}")
-            logging.error(f"Response body: {response.text}")
-            raise Exception(f"Failed to get PDF: {response.status_code}")
+            raise RuntimeError(f"PDF fetch failed (HTTP {response.status_code})")
         
         return response.content
     
@@ -119,19 +131,19 @@ class KivraApiClient:
         Returns:
             dict: Content details
         """
-        content_url = f"https://app.api.kivra.com/v1/content/{content_key}"
-        headers = {
-            'Authorization': f'token {self.access_token}',
-            'Accept': 'application/json'
-        }
-        
+        if self.actor_type == 'company':
+            raise RuntimeError(
+                'Company content detail operation is unknown; sender listing cannot supply parts. '
+                'Confirm the authenticated company detail request before downloading.'
+            )
+        content_url = f"https://app.api.kivra.com/v1/content/{quote(str(content_key), safe='')}"
+        headers = self._content_headers('application/json')
+
+        self._pace_request()
         response = self.session.get(content_url, headers=headers)
-        
+
         if response.status_code != 200:
-            logging.error(f"Failed to get content details. Status: {response.status_code}")
-            logging.error(f"URL: {content_url}")
-            logging.error(f"Response: {response.text}")
-            raise Exception(f"Failed to get content details: {response.status_code}")
+            raise RuntimeError(f"Content detail fetch failed (HTTP {response.status_code})")
         
         return response.json()
     
@@ -146,17 +158,32 @@ class KivraApiClient:
         Returns:
             bytes: File content
         """
-        file_url = f"https://app.api.kivra.com/v1/content/{content_key}/file/{file_key}/raw"
-        headers = {
-            'Authorization': f'token {self.access_token}'
-        }
-        
+        content_path = quote(str(content_key), safe='')
+        file_path = quote(str(file_key), safe='')
+        if self.actor_type == 'company':
+            actor_path = quote(str(self.actor_key), safe='')
+            file_url = (f"https://app.api.kivra.com/v4/company/{actor_path}/"
+                        f"content/{content_path}/parts/{file_path}/raw")
+        else:
+            file_url = f"https://app.api.kivra.com/v1/content/{content_path}/file/{file_path}/raw"
+        headers = self._content_headers()
+
+        self._pace_request()
         response = self.session.get(file_url, headers=headers)
-        
+
         if response.status_code != 200:
-            logging.error(f"Failed to get content file. Status: {response.status_code}")
-            logging.error(f"URL: {file_url}")
-            logging.error(f"Response: {response.text}")
-            raise Exception(f"Failed to get content file: {response.status_code}")
+            raise RuntimeError(f"Content file fetch failed (HTTP {response.status_code})")
         
         return response.content
+
+    def _content_headers(self, accept=None):
+        headers = {'Authorization': f'token {self.access_token}'}
+        if accept:
+            headers['Accept'] = accept
+        if self.actor_type == 'company':
+            headers.update({
+                'X-Actor-Type': self.actor_type,
+                'X-Actor-Key': self.actor_key,
+                'X-Session-Actor': f'user_{self.personal_user_id}'
+            })
+        return headers

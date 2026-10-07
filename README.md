@@ -58,7 +58,7 @@ If you have Nix with flakes enabled:
 nix run . -- --help
 
 # Typical run, storing under ./data/<ssn>/
-nix run . -- YYYYMMDDXXXX --base-dir ./data
+nix run . -- YYYYMMDDXXXX --root-dir ./data
 
 # Run with the web interaction provider
 nix run . -- YYYYMMDDXXXX --interaction-provider web --web-port 8080
@@ -71,6 +71,34 @@ nix develop
 
 ```
 
+### Company mailbox: one sender
+
+Use a fresh local BankID login for each command. Omit the personal number so it is
+prompted without appearing in shell history. The company actor key is prompted
+after authentication and stays in memory for that run. Obtain that key from your
+company mailbox; the personal user ID from the ID token is a different value.
+
+```powershell
+python kivra_sync.py --company --mailbox-name 'BeeMobile AB' --list-senders --root-dir 'C:\Users\pk\_git\Kivra'
+python kivra_sync.py --company --mailbox-name 'BeeMobile AB' --sender-key '<key from company sender list>' --root-dir 'C:\Users\pk\_git\Kivra'
+```
+
+Company data uses the existing filesystem storage provider under
+`<root-dir>/<mailbox-name>/Letters/<sender>/`, with listing and metadata in
+`Letters/json/`. The existing user mailbox path remains unchanged. To use the
+local year/month archive on this feature branch, pass `--company-layout dated`;
+that writes under `<root-dir>/<mailbox-name>/<sender>/YYYY/Month/` and rebuilds
+the sender index. Kivra API calls are serialized with a 1.2 second minimum
+interval by default (configurable with `--request-interval`, never below one
+second).
+
+The first command lists sender names, keys, and observed inbox counts without
+downloading message details. Company detail retrieval is currently blocked:
+the exact company detail operation that exposes message parts has not been
+verified. The sync command stops with that explicit error before downloading
+or writing a partial manifest in dated mode. Company mode requires local
+interaction and filesystem storage and does not fetch receipts.
+
 ## Advanced Configuration
 
 ### Storage Providers
@@ -80,7 +108,7 @@ nix develop
 Documents are stored in the local filesystem. 
 
 ```bash
-python kivra_sync.py YYYYMMDDXXXX --storage-provider filesystem --base-dir /path/to/store
+python kivra_sync.py YYYYMMDDXXXX --storage-provider filesystem --root-dir /path/to/store
 ```
 
 #### Paperless-ngx Storage
@@ -160,7 +188,8 @@ python kivra_sync.py YYYYMMDDXXXX --max-receipts 0
 | Option | Description |
 |--------|-------------|
 | `--storage-provider {filesystem,paperless}` | Storage provider to use (default: filesystem) |
-| `--base-dir DIR` | Base directory for storing documents (default: current working directory) |
+| `--root-dir DIR` | Root directory for storing documents (default: current working directory) |
+| `--base-dir DIR` | Backward-compatible alias for `--root-dir` |
 
 ### Paperless-specific Options
 | Option | Description |
