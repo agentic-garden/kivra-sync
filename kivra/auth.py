@@ -85,11 +85,16 @@ class KivraAuth:
         return token_info
 
     def _render_and_display_qr(self, qr_code_value):
-        """Render an (animated) BankID QR string to an image and display it.
+        """Display an animated BankID QR string through the selected provider.
 
         Called once for the initial frame and again on every poll so the
         displayed QR stays current — BankID rejects stale frames.
         """
+        display_payload = getattr(self.interaction_provider, 'display_qr_payload', None)
+        if callable(display_payload):
+            display_payload(qr_code_value)
+            return
+
         qr = qrcode.QRCode(
             version=1,
             error_correction=qrcode.constants.ERROR_CORRECT_L,

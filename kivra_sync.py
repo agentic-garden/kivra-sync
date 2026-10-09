@@ -15,6 +15,7 @@ from kivra.receipts import ReceiptFetcher
 from kivra.letters import LetterFetcher
 from storage.filesystem import FileSystemStoreProvider
 from interaction.local import LocalInteractionProvider
+from interaction.terminal import TerminalInteractionProvider
 from interaction.ntfy import NtfyInteractionProvider
 from interaction.web import WebInteractionProvider
 
@@ -93,8 +94,8 @@ def main():
     parser.add_argument('--base-dir', help='Base directory for storing documents (default: script directory)')
     
     # Interaction provider selection
-    parser.add_argument('--interaction-provider', choices=['local', 'ntfy', 'web'], default='local',
-                        help='Interaction provider to use (default: local)')
+    parser.add_argument('--interaction-provider', choices=['local', 'terminal', 'ntfy', 'web'], default='local',
+                        help='Interaction provider to use (default: local; terminal shows a refreshing QR)')
     
     # ntfy provider options
     parser.add_argument('--ntfy-topic', help='ntfy topic to send notifications to')
@@ -162,6 +163,8 @@ def main():
     # Initialize the interaction provider
     if args.interaction_provider == 'local':
         interaction_provider = LocalInteractionProvider()
+    elif args.interaction_provider == 'terminal':
+        interaction_provider = TerminalInteractionProvider()
     elif args.interaction_provider == 'ntfy':
         if not args.ntfy_topic:
             parser.error("--ntfy-topic is required when using the ntfy interaction provider")
