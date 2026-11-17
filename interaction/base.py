@@ -59,6 +59,16 @@ class InteractionProvider(ABC):
         """
         pass
     
+    def report_error(self, message, stats=None):
+        """
+        Report that the sync failed. Details are expected in the log.
+
+        Args:
+            message (str): Short, user-facing error description
+            stats (dict, optional): Statistics collected before the failure
+        """
+        pass
+
     @abstractmethod
     def report_authentication_success(self):
         """

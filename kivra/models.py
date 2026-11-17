@@ -366,21 +366,23 @@ class KivraReceipt(KivraDocument):
 class KivraLetter(KivraDocument):
     """Class representing a Kivra letter."""
     
-    def __init__(self, key, date, sender_name, data=None, part_index=None):
+    def __init__(self, key, date, sender_name, data=None, part_index=None, mailbox=None):
         """
         Initialize a Kivra letter.
-        
+
         Args:
             key (str): Letter key
             date (str): Letter date
             sender_name (str): Sender name
             data (dict, optional): Letter data
             part_index (int, optional): Part index for multi-part letters
+            mailbox (str, optional): Company mailbox name; None for the personal mailbox
         """
         super().__init__(key, date)
         self.sender_name = sender_name
         self.data = data
         self.part_index = part_index
+        self.mailbox = mailbox
     
     def get_metadata(self, content_type='application/json'):
         """
@@ -402,5 +404,8 @@ class KivraLetter(KivraDocument):
         
         if self.part_index is not None:
             metadata['part_index'] = self.part_index
-            
+
+        if self.mailbox is not None:
+            metadata['mailbox'] = self.mailbox
+
         return metadata

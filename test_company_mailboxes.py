@@ -9,9 +9,11 @@ from unittest.mock import Mock, patch
 
 from kivra.api import KivraApiClient
 from kivra.company import CompanyApiClient, CompanyLetterFetcher, fetch_company_mailboxes
+from kivra.models import KivraLetter
 from kivra_sync import fetch_documents, main
 from interaction.web import WebInteractionProvider
 from storage.filesystem import FileSystemStoreProvider
+from storage.paperless import PaperlessNgxStoreProvider
 
 
 class Response:
@@ -96,9 +98,14 @@ class Store:
         self.metadata_calls = 0
         self.parts = []
         self.events = []
+        self.listings = []
+        self.prepared = []
 
-    def report_listing(self, kind, listing):
-        pass
+    def prepare_mailbox(self, mailbox):
+        self.prepared.append(mailbox)
+
+    def report_listing(self, kind, listing, mailbox=None):
+        self.listings.append((kind, mailbox))
 
     def exists(self, metadata):
         return False
@@ -140,6 +147,16 @@ class CompanyFetcherTests(unittest.TestCase):
         self.assertEqual(store.metadata_calls, 1)
         self.assertEqual(store.events, ['part', 'part', 'metadata'])
 
+    def test_mailbox_is_carried_in_all_metadata(self):
+        store = Store()
+        CompanyLetterFetcher(Api(), store, mailbox='One AB').fetch_letters()
+        self.assertEqual(store.listings, [('letters', 'One AB')])
+        self.assertEqual([part['mailbox'] for part in store.parts], ['One AB', 'One AB'])
+        self.assertEqual([part['part_index'] for part in store.parts], [0, 1])
+
+    def test_personal_metadata_has_no_mailbox_key(self):
+        self.assertNotIn('mailbox', KivraLetter('key', '2025-01-02', 'Sender').get_metadata())
+
     def test_partial_store_fails_without_metadata_marker(self):
         store = Store(failed_part=True)
         with self.assertRaisesRegex(RuntimeError, 'stored 1 of 2 parts'):
@@ -163,11 +180,21 @@ class CliTests(unittest.TestCase):
                 self.assertEqual(args.fetch_receipts, True)
                 self.assertEqual(args.fetch_letters, True)
                 self.assertFalse(hasattr(args, 'company_key'))
+                self.assertFalse(args.include_company_mailboxes)
                 self.assertEqual(Path(store.base_dir), Path(directory) / '199001011234')
                 self.assertTrue((Path(store.base_dir) / 'Letters').is_dir())
 
+        argv = ['kivra_sync.py', '199001011234', '--include-company-mailboxes']
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(sys, 'argv', argv), \
+             patch('kivra_sync.os.getcwd', return_value=directory), \
+             patch('kivra_sync.fetch_documents', return_value=0) as fetch:
+            with self.assertRaises(SystemExit):
+                main()
+        self.assertTrue(fetch.call_args.args[0].include_company_mailboxes)
+
     def test_original_personal_fetch_order_and_aggregate_completion(self):
-        interaction = SimpleNamespace(report_completion=Mock())
+        interaction = SimpleNamespace(report_completion=Mock(), report_error=Mock())
         store = Store()
         events = []
         with patch('kivra_sync.KivraAuth') as auth, \
@@ -193,7 +220,14 @@ class CliTests(unittest.TestCase):
             personal_fetcher.return_value.fetch_letters.side_effect = letters
             companies.side_effect = company_sync
             args = SimpleNamespace(ssn='199001011234', fetch_receipts=True,
-                                   fetch_letters=True, max_letters=2, max_receipts=0)
+                                   fetch_letters=True, max_letters=2, max_receipts=0,
+                                   include_company_mailboxes=False)
+            self.assertEqual(fetch_documents(args, interaction, store, '/tmp'), 0)
+            companies.assert_not_called()
+            self.assertEqual(events, ['personal receipts', 'personal letters'])
+
+            events.clear()
+            args.include_company_mailboxes = True
             self.assertEqual(fetch_documents(args, interaction, store, '/tmp'), 0)
             self.assertEqual(events, ['personal receipts', 'personal letters', 'company letters'])
             client = personal_fetcher.call_args.args[0]
@@ -203,6 +237,7 @@ class CliTests(unittest.TestCase):
             self.assertIs(receipt_fetcher.call_args.args[1], store)
             self.assertEqual(personal_fetcher.return_value.fetch_letters.call_args.kwargs,
                              {'max_count': 2})
+            self.assertEqual(companies.call_args.args[1:], (store,))
             self.assertEqual(companies.call_args.kwargs, {'max_count': 2})
             self.assertEqual(interaction.report_completion.call_args.args[0], {
                 'receipts_total': 2, 'receipts_fetched': 2, 'receipts_stored': 2,
@@ -215,6 +250,7 @@ class CliTests(unittest.TestCase):
             interaction.report_completion.reset_mock()
             self.assertEqual(fetch_documents(args, interaction, store, '/tmp'), 1)
             interaction.report_completion.assert_not_called()
+            interaction.report_error.assert_called_once()
 
             web = WebInteractionProvider(host='127.0.0.1')
             self.assertEqual(fetch_documents(args, web, store, '/tmp'), 1)
@@ -253,8 +289,7 @@ class DiscoveryTests(unittest.TestCase):
                     'letters_total': 5, 'letters_fetched': 2, 'letters_stored': 2
                 }
                 totals, errors = fetch_company_mailboxes(
-                    self._personal_client(inboxes), personal_store, '199001011234',
-                    max_count=2,
+                    self._personal_client(inboxes), personal_store, max_count=2,
                 )
             self.assertEqual(errors, [])
             self.assertEqual(totals, {'letters_total': 15,
@@ -270,7 +305,9 @@ class DiscoveryTests(unittest.TestCase):
                 self.assertIsInstance(client, CompanyApiClient)
                 self.assertEqual(client.company_key, key)
                 self.assertEqual(client.get_headers()['X-Session-Actor'], 'user_personal-id')
-                self.assertEqual(Path(store.base_dir), Path(directory) / name)
+                self.assertIs(store, personal_store)
+                self.assertEqual(call.kwargs, {'mailbox': name})
+                self.assertTrue((Path(directory) / name / 'Letters').is_dir())
             self.assertTrue((Path(directory) / '199001011234' / 'Letters').is_dir())
 
     def test_zero_companies_and_invalid_discovery(self):
@@ -279,26 +316,26 @@ class DiscoveryTests(unittest.TestCase):
             personal = self._personal_client([
                 {'key': 'personal-id', 'name': 'Personal', 'type': 'user'}
             ])
-            self.assertEqual(fetch_company_mailboxes(personal, store, '199001011234'),
+            self.assertEqual(fetch_company_mailboxes(personal, store),
                              ({'letters_total': 0, 'letters_fetched': 0,
                                'letters_stored': 0}, []))
             personal.graphql_query.return_value = {'data': {}}
             with self.assertRaisesRegex(RuntimeError, 'inbox list'):
-                fetch_company_mailboxes(personal, store, '199001011234')
+                fetch_company_mailboxes(personal, store)
 
-    def test_non_filesystem_provider_is_reused(self):
+    def test_any_provider_is_reused_and_prepared(self):
         store = Store()
         inboxes = [{'key': 'company-1', 'name': 'One AB', 'type': 'company'}]
         with patch('kivra.company.CompanyLetterFetcher') as fetcher:
             fetcher.return_value.fetch_letters.return_value = {
                 'letters_total': 0, 'letters_fetched': 0, 'letters_stored': 0
             }
-            totals, errors = fetch_company_mailboxes(
-                self._personal_client(inboxes), store, '199001011234'
-            )
+            totals, errors = fetch_company_mailboxes(self._personal_client(inboxes), store)
         self.assertEqual(errors, [])
         self.assertEqual(totals['letters_total'], 0)
         self.assertIs(fetcher.call_args.args[1], store)
+        self.assertEqual(fetcher.call_args.kwargs, {'mailbox': 'One AB'})
+        self.assertEqual(store.prepared, ['One AB'])
 
     def test_collision_and_mailbox_error_do_not_stop_later_company(self):
         inboxes = [
@@ -315,7 +352,7 @@ class DiscoveryTests(unittest.TestCase):
                     {'letters_total': 1, 'letters_fetched': 1, 'letters_stored': 1},
                 ]
                 totals, errors = fetch_company_mailboxes(
-                    self._personal_client(inboxes), store, '199001011234'
+                    self._personal_client(inboxes), store
                 )
             self.assertEqual(fetcher.call_count, 2)
             self.assertEqual(fetcher.return_value.fetch_letters.call_count, 2)
@@ -324,6 +361,79 @@ class DiscoveryTests(unittest.TestCase):
             self.assertFalse((Path(directory) / 'Same AB' / 'Letters' / 'json' /
                               'letters.json').exists())
             self.assertTrue((Path(directory) / 'Last AB' / 'Letters').is_dir())
+
+
+class FileSystemMailboxTests(unittest.TestCase):
+    def test_company_documents_and_listing_go_to_company_folder(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = FileSystemStoreProvider(str(Path(directory) / '199001011234'))
+            store.prepare_mailbox('One AB')
+            metadata = KivraLetter('key-1', '2025-01-02', 'Sender',
+                                   mailbox='One AB').get_metadata('text/plain')
+            self.assertTrue(store.store('Hello', metadata))
+            self.assertTrue(store.exists(metadata))
+            store.report_listing('letters', ['company'], mailbox='One AB')
+            store.report_listing('letters', ['personal'])
+
+            company = Path(directory) / 'One AB' / 'Letters'
+            personal = Path(directory) / '199001011234' / 'Letters'
+            self.assertTrue((company / 'Sender' / '2025-01-02_Sender_key-1.txt').is_file())
+            self.assertFalse((personal / 'Sender').exists())
+            self.assertEqual((company / 'json' / 'letters.json').read_text().split(),
+                             ['[', '"company"', ']'])
+            self.assertEqual((personal / 'json' / 'letters.json').read_text().split(),
+                             ['[', '"personal"', ']'])
+            self.assertFalse(store.exists(KivraLetter('key-1', '2025-01-02', 'Sender')
+                                          .get_metadata('text/plain')))
+
+    def test_folder_collisions_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = FileSystemStoreProvider(str(Path(directory) / '199001011234'))
+            with self.assertRaisesRegex(ValueError, 'personal folder'):
+                store.prepare_mailbox('199001011234')
+            with self.assertRaisesRegex(ValueError, 'no usable folder name'):
+                store.prepare_mailbox('...')
+            store.prepare_mailbox('Foo AB')
+            with self.assertRaisesRegex(ValueError, "collides with mailbox 'Foo AB'"):
+                store.prepare_mailbox('Foo: AB')
+            # A repeated sync (listening mode) prepares the same mailbox again
+            store.prepare_mailbox('Foo AB')
+
+
+class PaperlessMailboxTests(unittest.TestCase):
+    def _store(self):
+        store = PaperlessNgxStoreProvider.__new__(PaperlessNgxStoreProvider)
+        store.api_url = 'http://paperless/api'
+        store.tags = ['kivra']
+        store.tag_ids = [1]
+        store.dry_run = False
+        store._mailbox_tag_ids = {}
+        store.session = Mock()
+        store.session.get.return_value = Response(data={'count': 1, 'results': [{'id': 7}]})
+        store.session.post.return_value = Response(data={})
+        store._get_correspondent_id = Mock(return_value=None)
+        store._get_document_type_id = Mock(return_value=None)
+        return store
+
+    def test_company_documents_get_mailbox_tag(self):
+        store = self._store()
+        store.prepare_mailbox('One & Two AB')
+        store.session.get.assert_called_once_with(
+            'http://paperless/api/tags/',
+            params={'name__iexact': 'kivra-sync: One & Two AB'},
+        )
+        metadata = KivraLetter('key-1', '2025-01-02', 'Sender',
+                               mailbox='One & Two AB').get_metadata('application/pdf')
+        self.assertTrue(store.store(b'%PDF', metadata))
+        self.assertEqual(store.session.post.call_args.kwargs['data']['tags'], [1, 7])
+        self.assertEqual(store.session.get.call_count, 1)
+
+    def test_personal_documents_only_get_global_tags(self):
+        store = self._store()
+        metadata = KivraLetter('key-1', '2025-01-02', 'Sender').get_metadata('application/pdf')
+        self.assertTrue(store.store(b'%PDF', metadata))
+        self.assertEqual(store.session.post.call_args.kwargs['data']['tags'], [1])
+        store.session.get.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -10,6 +10,8 @@ from storage.base import DocumentStoreProvider
 
 class PaperlessNgxStoreProvider(DocumentStoreProvider):
     """Storage provider that stores documents in paperless-ngx."""
+
+    MAILBOX_TAG_PREFIX = 'kivra-sync: '
     
     def __init__(self, api_url, api_token, tags=None, dry_run=False):
         """
@@ -35,6 +37,29 @@ class PaperlessNgxStoreProvider(DocumentStoreProvider):
         
         # Get tag IDs if tags are provided
         self.tag_ids = self._get_tag_ids(self.tags) if self.tags else []
+
+        # Company mailbox name -> tag IDs identifying documents from that mailbox
+        self._mailbox_tag_ids = {}
+
+    def prepare_mailbox(self, mailbox):
+        """
+        Resolve (creating if needed) the tag that marks documents from a company mailbox.
+
+        Args:
+            mailbox (str): Company mailbox name
+        """
+        self._mailbox_tags(mailbox)
+
+    def _mailbox_tags(self, mailbox):
+        """
+        Tag IDs for a mailbox: none for the personal mailbox, otherwise the
+        'kivra-sync: <mailbox>' tag.
+        """
+        if mailbox is None:
+            return []
+        if mailbox not in self._mailbox_tag_ids:
+            self._mailbox_tag_ids[mailbox] = self._get_tag_ids([f"{self.MAILBOX_TAG_PREFIX}{mailbox}"])
+        return self._mailbox_tag_ids[mailbox]
     
     def _get_tag_ids(self, tag_names):
         """
@@ -56,7 +81,8 @@ class PaperlessNgxStoreProvider(DocumentStoreProvider):
             
             # Check if tag exists - use case-insensitive exact match
             response = self.session.get(
-                f"{self.api_url}/tags/?name__iexact={tag_name}"
+                f"{self.api_url}/tags/",
+                params={'name__iexact': tag_name}
             )
             
             if response.status_code == 200:
@@ -197,13 +223,14 @@ class PaperlessNgxStoreProvider(DocumentStoreProvider):
         logging.warning(f"Failed to get/create document type for {doc_type}, document type will be skipped")
         return None
     
-    def report_listing(self, doc_type, listing):
+    def report_listing(self, doc_type, listing, mailbox=None):
         """
         Report a list of documents for logging or other purposes.
         
         Args:
             doc_type (str): Type of document (receipt/letter)
             listing (dict): Document listing data
+            mailbox (str, optional): Company mailbox name; None for the personal mailbox
         """
         # For paperless, we don't need to store the listing separately
         # as documents are indexed by the paperless system
@@ -412,9 +439,10 @@ class PaperlessNgxStoreProvider(DocumentStoreProvider):
                 document_metadata['document_type'] = document_type_id
             
             # Add tags if available
-            if self.tag_ids:
-                document_metadata['tags'] = self.tag_ids
-                logging.info(f"Adding tags to document: {self.tag_ids}")
+            tag_ids = self.tag_ids + self._mailbox_tags(metadata.get('mailbox'))
+            if tag_ids:
+                document_metadata['tags'] = tag_ids
+                logging.info(f"Adding tags to document: {tag_ids}")
             
             # Check if this is a dry run
             if self.dry_run:

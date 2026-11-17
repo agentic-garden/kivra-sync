@@ -10,35 +10,68 @@ from utils.pdf import html_to_pdf
 
 class FileSystemStoreProvider(DocumentStoreProvider):
     """Storage provider that stores documents in the file system."""
+
+    TYPE_FOLDERS = {'receipt': 'Receipts', 'letter': 'Letters'}
     
     def __init__(self, base_dir, dry_run=False):
         """
         Initialize with base directory for storage.
         
         Args:
-            base_dir (str): Base directory path
+            base_dir (str): Base directory path for the personal mailbox. Company
+                mailboxes are stored in sibling directories named after the company.
             dry_run (bool, optional): If True, don't actually store documents, just simulate
         """
         self.base_dir = base_dir
         self.dry_run = dry_run
-        self._ensure_directories()
-    
-    def _ensure_directories(self):
-        """Create necessary directory structure."""
-        os.makedirs(self.base_dir, exist_ok=True)
-        
-        # Create directories for receipts
-        self.receipts_dir = os.path.join(self.base_dir, "Receipts")
-        self.receipts_json_dir = os.path.join(self.receipts_dir, "json")
-        os.makedirs(self.receipts_dir, exist_ok=True)
-        os.makedirs(self.receipts_json_dir, exist_ok=True)
-        
-        # Create directories for letters
-        self.letters_dir = os.path.join(self.base_dir, "Letters")
-        self.letters_json_dir = os.path.join(self.letters_dir, "json")
-        os.makedirs(self.letters_dir, exist_ok=True)
-        os.makedirs(self.letters_json_dir, exist_ok=True)
-    
+        # Normalized company folder name -> mailbox name it is reserved for
+        self._mailbox_folders = {}
+        self._ensure_directories(self.base_dir)
+        self.receipts_dir, self.receipts_json_dir = self._type_dirs(self.base_dir, 'receipt')
+        self.letters_dir, self.letters_json_dir = self._type_dirs(self.base_dir, 'letter')
+
+    @classmethod
+    def _type_dirs(cls, root, doc_type):
+        """Return (content_dir, json_dir) for a document type under a mailbox root."""
+        type_dir = os.path.join(root, cls.TYPE_FOLDERS[doc_type])
+        return type_dir, os.path.join(type_dir, "json")
+
+    def _ensure_directories(self, root):
+        """Create the Receipts/Letters directory structure under a mailbox root."""
+        for doc_type in self.TYPE_FOLDERS:
+            for path in self._type_dirs(root, doc_type):
+                os.makedirs(path, exist_ok=True)
+
+    @staticmethod
+    def _mailbox_folder(mailbox):
+        """Folder name for a company mailbox."""
+        folder = clean_filename(mailbox, replace='').strip(' .')
+        if not folder:
+            raise ValueError(f"company mailbox {mailbox!r} has no usable folder name")
+        return folder
+
+    def _root_dir(self, mailbox):
+        """Root directory for a mailbox; the personal mailbox uses base_dir."""
+        if mailbox is None:
+            return self.base_dir
+        return os.path.join(os.path.dirname(self.base_dir), self._mailbox_folder(mailbox))
+
+    def prepare_mailbox(self, mailbox):
+        """
+        Reserve a sibling directory for a company mailbox.
+
+        Raises:
+            ValueError: If the folder name is unusable or collides with the
+                personal folder or another company mailbox
+        """
+        folder = os.path.normcase(self._mailbox_folder(mailbox))
+        if folder == os.path.normcase(os.path.basename(self.base_dir)):
+            raise ValueError(f"company mailbox folder {folder!r} collides with the personal folder")
+        owner = self._mailbox_folders.setdefault(folder, mailbox)
+        if owner != mailbox:
+            raise ValueError(f"company mailbox folder {folder!r} collides with mailbox {owner!r}")
+        self._ensure_directories(self._root_dir(mailbox))
+
     def _get_filepath(self, metadata):
         """
         Generate filepath based on metadata.
@@ -51,57 +84,49 @@ class FileSystemStoreProvider(DocumentStoreProvider):
         """
         doc_type = metadata.get('type')
         date = metadata.get('date', 'unknown_date')
-        
+
         if doc_type == 'receipt':
-            store_name = metadata.get('store_name', 'unknown_store')
-            safe_store = clean_filename(store_name)
-            
-            # Create store-specific directories if they don't exist
-            store_dir = os.path.join(self.receipts_dir, safe_store)
-            store_json_dir = os.path.join(self.receipts_json_dir, safe_store)
-            os.makedirs(store_dir, exist_ok=True)
-            os.makedirs(store_json_dir, exist_ok=True)
-            
-            filename_base = f"{date}_{safe_store}_{metadata.get('key')}"
-            return store_dir, store_json_dir, filename_base
-            
+            name = metadata.get('store_name', 'unknown_store')
         elif doc_type == 'letter':
-            sender_name = metadata.get('sender_name', 'unknown_sender')
-            safe_sender = clean_filename(sender_name)
-            
-            # Create sender-specific directories if they don't exist
-            sender_dir = os.path.join(self.letters_dir, safe_sender)
-            sender_json_dir = os.path.join(self.letters_json_dir, safe_sender)
-            os.makedirs(sender_dir, exist_ok=True)
-            os.makedirs(sender_json_dir, exist_ok=True)
-            
-            filename_base = f"{date}_{safe_sender}_{metadata.get('key')}"
-            
-            # Add part index if specified
-            if metadata.get('part_index') is not None:
-                filename_base = f"{filename_base}_part{metadata.get('part_index')}"
-                
-            return sender_dir, sender_json_dir, filename_base
-        
+            name = metadata.get('sender_name', 'unknown_sender')
         else:
             raise ValueError(f"Unknown document type: {doc_type}")
+
+        # Group documents per store/sender
+        safe_name = clean_filename(name)
+        type_dir, type_json_dir = self._type_dirs(self._root_dir(metadata.get('mailbox')), doc_type)
+        content_dir = os.path.join(type_dir, safe_name)
+        json_dir = os.path.join(type_json_dir, safe_name)
+        os.makedirs(content_dir, exist_ok=True)
+        os.makedirs(json_dir, exist_ok=True)
+
+        filename_base = f"{date}_{safe_name}_{metadata.get('key')}"
+
+        # Add part index if specified (letters only)
+        if doc_type == 'letter' and metadata.get('part_index') is not None:
+            filename_base = f"{filename_base}_part{metadata.get('part_index')}"
+
+        return content_dir, json_dir, filename_base
     
-    def report_listing(self, doc_type, listing):
+    def report_listing(self, doc_type, listing, mailbox=None):
         """
         Report a list of documents for logging or other purposes.
         
         Args:
-            doc_type (str): Type of document (receipt/letter)
+            doc_type (str): Type of document (receipts/letters)
             listing (dict): Document listing data
+            mailbox (str, optional): Company mailbox name; None for the personal mailbox
         """
         try:
             # Store listing as JSON
             if doc_type == 'receipts':
-                store_json_dir = os.path.join(self.receipts_json_dir, 'receipts.json')
+                _, json_dir = self._type_dirs(self._root_dir(mailbox), 'receipt')
             elif doc_type == 'letters':
-                store_json_dir = os.path.join(self.letters_json_dir, 'letters.json')
+                _, json_dir = self._type_dirs(self._root_dir(mailbox), 'letter')
+            else:
+                raise ValueError(f"Unknown listing type: {doc_type}")
 
-            with open(store_json_dir, 'w', encoding='utf-8') as f:
+            with open(os.path.join(json_dir, f"{doc_type}.json"), 'w', encoding='utf-8') as f:
                 json.dump(listing, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logging.error(f"Error storing document listing: {str(e)}")

@@ -4,16 +4,36 @@
 from abc import ABC, abstractmethod
 
 class DocumentStoreProvider(ABC):
-    """Abstract base class for document storage providers."""
+    """
+    Abstract base class for document storage providers.
+
+    Metadata dicts passed to the methods below may carry a 'mailbox' key with
+    the name of the company mailbox a document came from. It is absent for the
+    personal mailbox. Each provider decides how to represent it (e.g. a folder
+    or a tag).
+    """
+
+    def prepare_mailbox(self, mailbox):
+        """
+        Validate and prepare storage for a company mailbox before fetching from it.
+
+        Args:
+            mailbox (str): Company mailbox name
+
+        Raises:
+            ValueError: If the provider cannot store documents for this mailbox
+        """
+        pass
 
     @abstractmethod
-    def report_listing(self, doc_type, listing):
+    def report_listing(self, doc_type, listing, mailbox=None):
         """
         Report a list of documents for logging or other purposes.
-        
+
         Args:
             doc_type (str): Type of document (receipt/letter)
             listing (dict): Document listing data
+            mailbox (str, optional): Company mailbox name; None for the personal mailbox
         """
         pass
     

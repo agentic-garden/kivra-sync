@@ -130,6 +130,19 @@ class WebInteractionProvider(InteractionProvider):
         print(f"Letters: {stats['letters_fetched']} of {stats['letters_total']} fetched, {stats.get('letters_stored', 0)} stored")
         print(f"Web interface available at http://{self.host}:{self.port}")
     
+    def report_error(self, message, stats=None):
+        """
+        Report a sync failure via the web interface.
+        
+        Args:
+            message (str): Short, user-facing error description
+            stats (dict, optional): Statistics collected before the failure
+        """
+        data = {"status": "error", "message": message}
+        if stats is not None:
+            data["stats"] = stats
+        self._send_sse_message(data)
+    
     def report_authentication_success(self):
         """
         Report that BankID authentication was successful and data sync is starting.

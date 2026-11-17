@@ -148,6 +148,19 @@ python kivra_sync.py YYYYMMDDXXXX --max-letters 10 --max-receipts 5
 python kivra_sync.py YYYYMMDDXXXX --max-receipts 0
 ```
 
+### Company Mailboxes
+
+If your Kivra account has access to company mailboxes, add `--include-company-mailboxes` to also fetch their letters. Company letters are only fetched when letter fetching is enabled, and `--max-letters` applies to each mailbox separately.
+
+```bash
+python kivra_sync.py YYYYMMDDXXXX --include-company-mailboxes
+```
+
+How company letters are stored depends on the storage provider:
+
+- **Filesystem**: each company gets its own folder next to the personal one, e.g. `<base-dir>/Example AB/Letters/...` alongside `<base-dir>/YYYYMMDDXXXX/`.
+- **Paperless-ngx**: documents get a `kivra-sync: <Company name>` tag in addition to `--paperless-tags`.
+
 ## Command-Line Reference
 
 ### General Options
@@ -188,6 +201,7 @@ python kivra_sync.py YYYYMMDDXXXX --max-receipts 0
 | `--fetch-letters` / `--no-fetch-letters` | Enable/disable letter fetching (default: enabled) |
 | `--max-receipts N` | Maximum number of receipts to fetch (0 for unlimited) |
 | `--max-letters N` | Maximum number of letters to fetch (0 for unlimited) |
+| `--include-company-mailboxes` | Also fetch letters from company mailboxes (default: disabled) |
 
 ## Project Structure
 

@@ -8,16 +8,18 @@ from kivra.models import LETTERS_QUERY, KivraLetter
 class LetterFetcher:
     """Class for fetching letters from Kivra."""
     
-    def __init__(self, api_client, document_store):
+    def __init__(self, api_client, document_store, mailbox=None):
         """
         Initialize the letter fetcher.
-        
+
         Args:
             api_client (KivraApiClient): Kivra API client
             document_store (DocumentStoreProvider): Document store provider
+            mailbox (str, optional): Company mailbox name; None for the personal mailbox
         """
         self.api_client = api_client
         self.document_store = document_store
+        self.mailbox = mailbox
     
     def fetch_letters(self, max_count=None):
         """
@@ -62,7 +64,7 @@ class LetterFetcher:
             print(f"\nFound a total of {total_letters} letters")
             
             # Report letter list for storage
-            self.document_store.report_listing('letters', all_letters)
+            self.document_store.report_listing('letters', all_letters, mailbox=self.mailbox)
             
             # Limit the number of letters if max_count is set
             if max_count is not None:
@@ -112,7 +114,7 @@ class LetterFetcher:
         sender = letter_data.get('sender', {}).get('name', 'unknown_sender')
         
         # Create letter object
-        letter = KivraLetter(letter_key, date, sender)
+        letter = KivraLetter(letter_key, date, sender, mailbox=self.mailbox)
         
         # Check if JSON metadata already exists
         json_metadata = letter.get_metadata()
@@ -168,8 +170,9 @@ class LetterFetcher:
             part_letter = KivraLetter(
                 letter.key, 
                 letter.date, 
-                letter.sender_name, 
-                part_index=part_index if len(parts) > 1 else None
+                letter.sender_name,
+                part_index=part_index if len(parts) > 1 else None,
+                mailbox=letter.mailbox
             )
             
             if content_type == 'text/plain':

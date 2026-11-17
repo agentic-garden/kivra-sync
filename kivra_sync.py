@@ -65,9 +65,12 @@ def fetch_documents(args, interaction_provider, document_store, temp_dir):
             letter_fetcher = LetterFetcher(api_client, document_store)
             letter_stats = letter_fetcher.fetch_letters(max_count=None if args.max_letters == 0 else args.max_letters)
             stats.update(letter_stats)
+
+        # Fetch company mailbox letters if enabled
+        if args.fetch_letters and args.include_company_mailboxes:
             try:
                 company_stats, company_errors = fetch_company_mailboxes(
-                    api_client, document_store, args.ssn,
+                    api_client, document_store,
                     max_count=None if args.max_letters == 0 else args.max_letters
                 )
             except Exception as exc:
@@ -79,12 +82,9 @@ def fetch_documents(args, interaction_provider, document_store, temp_dir):
 
             if company_errors:
                 logging.error('Company mailbox sync failed for %s mailbox(es)', len(company_errors))
-                if isinstance(interaction_provider, WebInteractionProvider):
-                    interaction_provider._send_sse_message({
-                        'status': 'error',
-                        'message': 'Company mailbox sync failed. Check terminal for details.',
-                        'stats': stats,
-                    })
+                interaction_provider.report_error(
+                    'Company mailbox sync failed. Check terminal for details.', stats
+                )
                 return 1
         
         # Report completion
@@ -145,6 +145,8 @@ def main():
     parser.add_argument('--no-fetch-letters', action='store_false', dest='fetch_letters', help='Do not fetch letters')
     parser.add_argument('--max-receipts', type=int, default=0, help='Maximum number of receipts to fetch (default: 0, 0 for unlimited)')
     parser.add_argument('--max-letters', type=int, default=0, help='Maximum number of letters to fetch (default: 0, 0 for unlimited)')
+    parser.add_argument('--include-company-mailboxes', action='store_true', default=False,
+                        help='Also fetch letters from company mailboxes you have access to (default: disabled)')
     
     args = parser.parse_args()
     

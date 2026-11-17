@@ -1,14 +1,12 @@
 """Company mailbox adapter for Kivra's web API."""
 
 import logging
-import os
 from urllib.parse import urlsplit
 
 from kivra.api import KivraApiClient
 from kivra.letters import LetterFetcher
 from kivra.models import KivraLetter
-from storage.filesystem import FileSystemStoreProvider
-from utils.helpers import clean_filename, format_date
+from utils.helpers import format_date
 
 
 GET_USER_QUERY = """
@@ -103,6 +101,7 @@ class CompanyLetterFetcher(LetterFetcher):
             letter_key,
             format_date(letter_data.get('receivedAt')),
             sender,
+            mailbox=self.mailbox,
         )
         metadata = letter.get_metadata()
         if self.document_store.exists(metadata):
@@ -125,8 +124,13 @@ class CompanyLetterFetcher(LetterFetcher):
         return letters_stored + 1
 
 
-def fetch_company_mailboxes(personal_client, document_store, personal_folder, max_count=None):
-    """Discover and fetch every company inbox in the authenticated user session."""
+def fetch_company_mailboxes(personal_client, document_store, max_count=None):
+    """
+    Discover and fetch every company inbox in the authenticated user session.
+
+    Documents are stored in the shared document store, tagged with the company
+    mailbox name in their metadata; the store decides how to represent it.
+    """
     response = personal_client.graphql_query('GetUser', GET_USER_QUERY, {})
     inboxes = (response.get('data') or {}).get('inboxes')
     if not isinstance(inboxes, list):
@@ -134,8 +138,7 @@ def fetch_company_mailboxes(personal_client, document_store, personal_folder, ma
 
     totals = {'letters_total': 0, 'letters_fetched': 0, 'letters_stored': 0}
     errors = []
-    filesystem = isinstance(document_store, FileSystemStoreProvider)
-    folder_names = {os.path.normcase(personal_folder)} if filesystem else set()
+    seen_names = set()
 
     for inbox in inboxes:
         if not isinstance(inbox, dict):
@@ -152,28 +155,19 @@ def fetch_company_mailboxes(personal_client, document_store, personal_folder, ma
             company_key = inbox.get('key')
             if not isinstance(company_key, str) or not company_key:
                 raise ValueError('company mailbox is missing its actor key')
-            if filesystem:
-                folder = clean_filename(name, replace='').strip(' .')
-                if not folder:
-                    raise ValueError('company mailbox has no usable folder name')
-                normalized = os.path.normcase(folder)
-                if normalized in folder_names:
-                    raise ValueError(f'company mailbox folder {folder!r} collides with another mailbox')
-                folder_names.add(normalized)
-                company_store = FileSystemStoreProvider(
-                    os.path.join(os.path.dirname(document_store.base_dir), folder),
-                    dry_run=document_store.dry_run,
-                )
-            else:
-                company_store = document_store
+            # The name identifies the mailbox in storage, so it must be unique
+            if name in seen_names:
+                raise ValueError(f'company mailbox name {name!r} is not unique')
+            seen_names.add(name)
+            document_store.prepare_mailbox(name)
 
             client = CompanyApiClient(
                 personal_client.access_token, personal_client.actor_key, company_key
             )
             print(f'\nFetching company mailbox: {name}')
-            mailbox_stats = CompanyLetterFetcher(client, company_store).fetch_letters(
-                max_count=max_count
-            )
+            mailbox_stats = CompanyLetterFetcher(
+                client, document_store, mailbox=name
+            ).fetch_letters(max_count=max_count)
             for key in totals:
                 totals[key] += mailbox_stats[key]
         except Exception as exc:
